@@ -1,0 +1,847 @@
+---
+title: "Calcul de la Value at Risk 95% du titre Colgate-Palmolive (CL) et Backtesting"
+author: "ROBIN Alexandre"
+date: "A rendre le : 29/12/2022"
+output: pdf_document
+toc: true
+fontsize: 7pt
+geometry: margin=1in
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#tinytex::install_tinytex()
+library(tinytex)
+library(xts)
+library(forecast) 
+library(moments)
+library(yfR)
+library(scales)
+library(rugarch)
+library(BatchGetSymbols)
+library(PerformanceAnalytics)
+library(parallel)
+library(zoo)
+library(ghyp)
+library(SkewHyperbolic)
+```
+
+```{r init, include = FALSE}
+my_ticker <- 'CL'
+first_date <- "2009-01-01"
+last_date <-"2022-11-01"
+
+# fetch data
+df_yf <- yf_get(tickers = my_ticker, 
+                first_date = first_date,
+                last_date = last_date,
+                freq_data='daily',type_return='log')
+
+pt<-df_yf$price_adjusted
+dpt=diff(pt)
+datesp<-df_yf$ref_date
+dates<-datesp[-1]
+
+rendement=df_yf$ret_adjusted_prices[-1]
+N<-length(rendement)
+rt<-xts(x=rendement,order.by=dates)
+rte=rendement[1:2264]#rt sur ensemble estimation de 2009 - 2017 inclu
+Ne=length(rte)
+datesrte<-dates[1:2264]
+rtt=rendement[2265:N]#rt sur l'ensemble de test de 2018 - 2022
+Nt=length(rtt)
+alpha=0.95 #VaR à 95%
+```
+
+\pagebreak
+
+# Introduction
+
+Ce rapport s'inscrit dans la continuité du rapport précédent (*"Caractéristiques des rendements de l'action Colgate-Palmolive"*). Nous utiliserons un niveau de confiance 95%.
+
+Vous retrouverez dans le corps de ce texte :
+
+-   les différentes VaR estimées
+-   la VaR Paramétrique par méthode fenêtre glissante (estimée à partir du modèle ARMA/GARCH conservé)
+-   les résultats du backtesting sur les VaR Normale, Cornosh-Fisher, Historique et Paramétrique
+-   le modèle ARMA/GARCH conservé parmi 6 modèles étudiés
+
+Vous retrouverez en annexes de ce rapport :
+
+-   le choix de la distribution
+-   les autres modèles ARCH/GARCH (qui n'ont donc pas été retenus, avec justifications)
+-   la VaR Paramétrique avec filtre
+
+## A. Les VaR
+
+### a. Définitions des VaR
+
+De manière générale la Value at Risk (VaR) est une mesure de risque de perte financière sur une période donnée. Elle est généralement calculée en prenant en compte la volatilité et le rendement attendu d'un portefeuille et un niveau de confiance souhaité.
+
+Par exemple, si la VaR d'un portefeuille est de 100 000 dollars à un niveau de confiance de 95%, cela signifie qu'il y a une probabilité de 5% que la perte sur le portefeuille dépasse 100 000 dollars sur une période donnée. La VaR est donc utilisée pour évaluer la perte maximale que l'on s'attend à subir avec une certaine probabilité sur une période donnée.
+
+Dans ce projet nous avons calculé les Values at Risk suivantes :
+
+\textbf{\underline{Définitions :}}
+\begin{enumerate}
+  \item \textbf{VaR Normale :} variante de la VaR classique qui utilise une distribution de probabilité normale pour modéliser le risque de perte d'un portefeuille financier sur une période donnée. Notons qu'elle peut sous-estimer le risque de perte dans les situations où la distribution des pertes est asymétrique ou a des queues épaisses, ce qui peut se produire dans les marchés financiers volatils.
+  \item \textbf{VaR Historique :} basée sur l'historique des pertes passées du portefeuille financier, on commence par recueillir des données sur les pertes passées du portefeuille. Ces données sont ensuite utilisées pour estimer la distribution de probabilité des pertes du portefeuille. Cependant, elle peut sous-estimer le risque de perte dans les situations où les conditions de marché ont changé depuis l'historique des données utilisé pour le calcul.
+  \item \textbf{VaR Cornish-Fisher (VaR Modifiée) :} variante de la VaR classique qui tient compte des caractéristiques de distribution. Elle utilise des estimations de la déviation standard et de l'asymétrie de la distribution de la perte pour améliorer la précision de la VaR.
+  \item \textbf{VaR Paramétrique :} variante de la VaR classique pour laquelle on commence par estimer les paramètres de la distribution de probabilité des rendements du portefeuille. On cherche alors une distribution qui se rapproche le plus de la véritable distribution des rendements.
+\end{enumerate}
+
+\pagebreak
+
+### b. VaR Paramétrique
+
+```{r varparametrique, echo=FALSE}
+no_cores <- detectCores() - 1
+cl <- makeCluster(no_cores)
+
+spec = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                         mean.model=list(armaOrder=c(1,1)),distribution.model="ghst"
+                         , fixed.pars = list(delta=1)) #, skew=0)
+
+roll=ugarchroll(spec, data=rte,n.ahead=1,forecast.length=length(rtt),refit.every=1,
+                refit.window="moving",solver = "hybrid", cluster=cl,fit.control = list(),calculate.VaR=TRUE,VaR.alpha=0.05,keep.coef = TRUE)
+
+stopCluster(cl)
+library(zoo)
+valueatrisk<-zoo(roll@forecast$VaR[,1])
+reelles<-zoo(roll@forecast$VaR[,2])#=rtt
+index<-rownames(roll@forecast$VaR)
+
+plot(dates[2265:N],reelles,type='b',xlab="Dates",ylab="Rendements et VaR")
+lines(dates[2265:N],valueatrisk,type='l',col="red")
+legend("topright",inset=.05,c("rt","VaR"),col=1:2,lty=c(1,1))
+```
+
+
+
+```{r plot varparam, eval=FALSE, include=FALSE}
+knitr::include_graphics("~/IREF/S3/value_at_risk_LEBRETON/Colgate-Palmolive-Group/var_fe_glissante.png")
+```
+
+
+Nous avons tracé sur la Figure ci-dessus les valeurs réelles `rtt` et les valeurs pour la VaR avec la méthode fenêtre glissante. Chaque point de `rtt` qui est inférieur au point de la VaR au même instant correspond à une violation empirique. Notre VaR 95% nous autorise 61 violations en théorie (1217 $*$ 5%).
+
+### c. Backtesting
+
+Afin de savoir si nos modèles donnent une VaR correctement estimés, nous utilisons 2 tests statistiques :
+
+\begin{itemize}
+  \item la valeur p de Kupiec ($H_0$ : taux de violation théorique 5 pourcents = taux de violation empirique 5.3 pourcents)
+  \item la valeur p de Christoffersen ($H_0$ : même hypothèse qu'avec Kupiec mais sans auto-corrélation entre les violations)
+\end{itemize}
+
+Si on rejette $H_0$ de ces tests, et si les violations empiriques sont plus grandes que 61, alors notre VaR est sous-estimée. A l'inverse, si on rejette $H_0$ et que le nombre de violations empiriques est inférieur à 61, notre VaR est sur-estimée.
+
+```{r backtestingparametrique, echo=FALSE}
+#load("data.rdata")
+report(roll,type="VaR",VaR.alpha=0.05,conf.level=0.95)
+
+```
+
+Nous pouvons étudier la sortie de R présentée ci-dessus pour réaliser le backtesting de la VaR paramétrique à 95%. 
+\begin{itemize}
+  \item Notons un taux de violations théorique de 5 pourcents (puisque nous utilisons un niveau de confiance 95 pourcents) et un taux de violation théorique de 5.3 pourcents. Correspondant respectivement à 60.9 et 65 violations théoriques et empiriques.
+  \item Nous pouvons accepter $H_0$ du test de Kupiec et $H_0$ du test de Christoffersen. Notre modèle donne donc une VaR qui estime correctement le risque.
+\end{itemize}
+
+```{r, fig.cap="Tableau récapitulatif des VaR calculées et résultats backtesting", echo=FALSE}
+knitr::include_graphics("~/IREF/S3/value_at_risk_LEBRETON/Colgate-Palmolive-Group/tableauVAR.png")
+```
+
+Ce tableau résume les résultats aux tests de Kupiec et de Christoffersen pour les différentes Values at Risk calculées dans le cadre de ce projet.
+
+Nous pouvons remarquer qu'il n'y a que la VaR Paramétrique obtenue avec notre APARCH selon une distribustion `ghst` qui est correctement estimée. Nos 3 autres VaR sous-estiment le risque. Nous pouvions nous y attendre puisque la crise Covid a frappé le monde sur la période de `rtt` (2018-2022), ayant des effets négatifs sur les cours de nombreuses actions dont l'action Colgate-Palmolive. Et l'échantillon `rte` utilisé pour le calibrage de nos modèles et le calcul des VaR couvre une période sans grande crise notable (2009-2017).
+
+```{r, fig.cap="Chronogramme du cours de l'action Colgate-Palmolive (en €uros)", echo=FALSE}
+plot(dates[1:length(dates)],pt[1:length(dates)],type="l",xlab="Années",ylab="Cours CL",col=3)
+```
+
+\pagebreak
+
+## B. Calcul de la VaR Paramétrique
+
+Pour le calcul de notre VaR paramétrique, nous avons décidé d'utiliser un APARCH(1,1) couplé à une distribution GHST (Generalized Hyperbolic Skew T).
+
+On a :
+$$
+r_t=\mu + v_t 
+$$
+$$
+v_t=\sigma_t \epsilon_t
+$$
+
+\begin{equation}
+  \sigma_t^\delta = \alpha_0 + \alpha_1 (|v_{t-1}|- \gamma_1 v_{t-1})^\delta + \beta_1 \sigma_{t-1}^\delta
+\end{equation}
+
+```{r spec choisie, echo=FALSE}
+specCHOISIE = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                         mean.model=list(armaOrder=c(1,1)),distribution.model="ghst"
+                         , fixed.pars = list(delta=1)) #, skew=0)
+fitCHOISIE= ugarchfit(spec = specCHOISIE,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fitCHOISIE)
+```
+
+Nous avons fixé $\delta = 1$ car proche de 1 (si nous avions eu $\delta$ proche de 2, nous aurions utilisé un modèle gjr-GARCH).
+
+\begin{itemize}
+  \item `Robust Standard Errors:` `omega` et `skew` sont les deux seuls coefficients qui ne sont pas significativement différents de zéro. Il est surtout important de remarque que $\beta1 \neq 0$, $\gamma_1 \neq 0$ et est positif (une mauvaise nouvelle fait augmenter la volatilité du titre) et $\delta = 1$.
+  \item `Bayes Information Criteria` = -6.4567 
+  \item `Weighted Ljung-Box Test on Standardized Residuals:` Ici nous voulons savoir si les valeurs de $p$ et $q$ dans notre $ARMA(p,q)$ sont bonnes et nous testons $H_0$: absence d'auto-corrélation versus $H_a$: présence d'auto-corrélation. Toutes les pvalues étant supérieures à 5%, nous ne pouvons rejeter $H_0$, le modèle ARMA(1,1) a réussi à prendre en compte l'auto-corrélation présente dans les aléas de `rte`.
+  \item `Weighted ARCH LM Tests`: Ici nous voulons savoir si les valeurs de $m$ et $n$ dans notre $GARCH(m,n)$ sont bonnes et nous testons $H_0$: absence de clusters de volatilité versus $H_a$: présence de clusters de volatilité. Toutes les pvalues étant supérieures à 5%, nous ne pouvons rejeter $H_0$, le modèle GARCH(1,1) a réussi à prendre en compte tous les clusters de volatilité présents dans `rte`.
+  \item `Nyblom stability test` : Nous testons ici la stabilité des coefficients dans le temps. Commençons par la statistique jointe : $H_0$ : tous les coefficients sont stables dans le temps vs $H_a$ : un ou plusieurs coefficients n'est pas stable dans le temps. Nous rejettons $H_0$ puisque la statistique jointe observée 2.59 > 2.32 la statistique jointe critique pour un niveau de confiance de 95%. Regardons aux statistiques individuelles, nous pouvons dire que les coefficients $\omega$, $\alpha_1$, $\beta_1$ et `shape` ne sont pas stables dans le temps (statistique individuelle observée > statistique individuelle critique).
+  \item `Sign Bias Test`: Nous voulons savoir au travers de ce test s'il y a un effet signe ou un effet taille ou les 2 dans nos données. Pour cela commençons par le test joint avec comme hypothèse nulle $H_0$ : il n'y a pas d'effet signe et pas d'effet taille, versus $H_a$ : il y a soit un effet signe, soit un effet taille, soit les 2. Selon la pvalue de l'effet joint, nous ne pouvons pas rejetter $H_0$ (pvalue = 0.8361 > 0.05).
+  \item `Adjusted Pearson Goodness-of-Fit Test`: Dernier test, nous voulons savoir si la distribution supposée dans la spécification (ici GHST) est en adéquation avec la distribution empirique des résidus standardisés. Nous testons donc $H_0$ : adéquation des 2 distributions, versus $H_a$ : la distribution employée n'est pas la bonne. Toutes les pvalues sont supérieures à 0.05, nous pouvons garder la distribution GHST.
+\end{itemize}
+
+Notre APARCH(1,1) coche donc toutes les cases nécessaires pour que nous le conservions. C'est donc la spécification choisie pour obtenir la VaR paramétrique 95%.
+
+\pagebreak
+
+# Annexes
+
+```{r tabGARCHasym, echo=FALSE, fig.cap="Tableau récapitulatif tests pour des modèles ARCH/GARCH asymétriques"}
+knitr::include_graphics("~/IREF/S3/value_at_risk_LEBRETON/Colgate-Palmolive-Group/tableauARCHGARCH1.png")
+```
+
+```{r tabGARCHsym, echo=FALSE, fig.cap="Tableau récapitulatif tests pour des modèles ARCH/GARCH symétriques"}
+knitr::include_graphics("~/IREF/S3/value_at_risk_LEBRETON/Colgate-Palmolive-Group/tableauARCHGARCH2.png")
+```
+
+Les tableaux ci-dessus résument les résultats obtenus aux tests sur les modèles ARCH/GARCH étudiés. Nous avons décrit plus en détails chacun des modèles en Annexes B.
+
+## Annexes A : Choix de la distribution
+```{r epaisseurdesqueues, echo=FALSE}
+qqnorm(rte)
+qqline(rte, col = 2)
+```
+
+\textbf{Commentaires :} Les queues de distribution sont plus épaisses que celles d'une loi Normale (confirmé dans le projet 1 avec le test d'Anscombe), les points ne sont pas sur la droite. La queue est a priori plus lourde à gauche qu'à droite. C'est donc a priori plus épais dans les valeurs négatives de rendement parce que l'écart entre les points et la droite rouge est plus grand.
+
+```{r choixdistrib, echo=FALSE}
+#estimation d'une distribution normale
+fitn<-fit.gaussuv(data=rte)
+summary(fitn)
+
+#estimation student asym�trique
+fitstu<-fit.tuv(rte,silent=T)
+summary(fitstu)
+
+#gaussienne inverse asym�trique
+fitnig<-fit.NIGuv(data=rte,silent=T)
+summary(fitnig)
+
+#hyperbolique asym�trique
+fithyp<-fit.hypuv(rte,silent=T)
+summary(fithyp)
+
+
+#hyperbolique g�n�ralis�e asym�trique
+fitghypuv<-fit.ghypuv(rte,silent=T)
+summary(fitghypuv)
+
+plot(density(rte))
+lines(fitstu,col=2)#student
+lines(fitnig,col=3)#estimateur de la densit� de rte
+lines(fithyp,col=4)
+lines(fitghypuv,col=5)
+legend("topleft",legend =c("rte","student","nig","hyp","ghyp"), col =1:5,lty=rep(1,5))
+```
+
+```{r plotghst, echo = FALSE, fig.cap="Distribution `ghst` sur l'histogramme de rte (à gauche) et la distribution rte comparée à `ghst` la droite rouge (à droite)" }
+ghstfit<-skewhypFit(rte, print = FALSE, plot = TRUE, hessian = TRUE)
+op <- par(mfrow = c(1,2))
+plot(ghstfit, which = 1)
+plot(ghstfit, which = 3)
+par(op)
+```
+
+Nous retenons les distributions `nig` (Normal Inversed Gaussian) et `ghst` (Generalized Hyperbolic Skew T) pour nos tests. Ce sont les distributions qui semblent être les plus proches de la véritable distribution de `rte`.
+
+## Annexes B : Modèles ARCH/GARCH non conservés
+
+En complément des tableaux récapitulant les résultats obtenus aux différents test sur les modèles ARCH,GARCH, ici seront présentés et commentés tous les modèles ARCH/GARCH estimés qui n'ont pas retenus notre attention. Seront données en commentaires les raisons pour lesquelles nous n'avons pas utilisé chacun de ces modèles.
+
+Dans notre démarche de recherche du "meilleur" modèle au sein de ces 6 modèles, on change l'équation de la variance conditionnelle : 
+$$
+\sigma_t^2 = \Omega + \alpha_1 v_{t-1}^2 + \beta_1 \sigma_{t-1}^2
+$$ 
+Nous avons employé 6 modèles, 3 sont des GARCH symétriques, les 3 autres sont des GARCH asymétriques.
+
+\textbf{Remarque:} Notons que pour tous les modèles ARCH/GARCH estimés selon une distribution `nig`, nous avons ajouté des variables muettes afin de modéliser l'effet week-end (`mxreg1`) et l'effet janvier (`mxreg2`) s'il y en a dans nos données (= permettant de modéliser la saisonnalité). Etant donné que ces coefficients n'ont jamais été significativement différents de zéro, ils n'ont jamais été conservés dans les modèles. C'est pourquoi, dans un souci de présentation, vous ne retrouverez dans ce rapport que la première estimation avec ces 2 coefficients pris en compte (pour un APARCH(1,1)). Les autres modèles estimés avec les variables muettes sont disponibles dans le code du projet.
+
+### 1. APARCH
+
+Pour notre APARCH(1,1), nous avons un processus $v_t$ qui satisfait une représentation APARCH(1,1) ssi :
+$$
+r_t=\mu + v_t 
+$$
+$$
+v_t=\sigma_t \epsilon_t
+$$
+
+\begin{equation}
+  \sigma_t^\delta = \alpha_0 + \alpha_1 (|v_{t-1}|- \gamma_1 v_{t-1})^\delta + \beta_1 \sigma_{t-1}^\delta
+\end{equation}
+
+
+```{r, echo = FALSE}
+jour=format(dates, format = "%A")
+mois=format(dates, format = "%B")
+moisrte=mois[1:2264]
+janvier=as.integer(moisrte=="avril")
+jourrte=jour[1:2264]#comme rte
+lundi=as.integer(jourrte=="lundi")
+
+spec7 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),
+                   distribution.model="nig")
+fit7= ugarchfit(spec = spec7,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit7)
+```
+
+Les coefficients `mxreg1` (effet lundi) et `mxreg` (effet janvier) ne sont pas significativement différents de zéro, on peut alors enlever ces variables dummy du modèle.
+
+```{r, echo = FALSE}
+spec7 = ugarchspec(variance.model=list(model="apARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),
+                   distribution.model="nig")
+fit7= ugarchfit(spec = spec7,data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit7)
+```
+
+Pour ce modèle, aucun des coefficients n'est significativement différent de 0.
+
+### 2. GJR-GARCH
+
+Nous avons ensuite testé des gjr-GARCH(1,1).
+$$
+r_t=\mu + v_t 
+$$
+$$
+v_t=\sigma_t \epsilon_t
+$$
+
+\begin{equation}
+  \sigma_t^2 = 
+    \begin{cases}
+      \alpha_0 + (\alpha_1 + \gamma) v_{t-1}^2 + \beta_1 \sigma_{t-1}^2 & \text{si } \epsilon_{t-i} \leq 0 \\
+      \alpha_0 + \alpha_1 v_{t-1}^2 + \beta_1 \sigma_{t-1}^2 & \text{sinon }
+    \end{cases}
+\end{equation}
+
+Notons que la présence d'effet de levier dans l'équation de $\sigma_t^2$ implique que les $\gamma$ doivent être > 0.
+
+```{r gjrgarch_nig_allcoefs, echo = FALSE}
+# spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)), fixed.pars = mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig")
+# fit6= ugarchfit(spec = spec6,data = rte,solver="hybrid")
+# show(fit6)
+
+spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig")
+fit6= ugarchfit(spec = spec6,data = rte,solver="hybrid")
+show(fit6)
+```
+
+Ici $\gamma1$ n'est pas > 0, les coefficients `ar1`, `ma1` et `skew` non plus. A cause de la non significativité de $\gamma$, nous essayons un modèle gjr-GARCH en fixant `ar1` à 0.
+
+```{r gjrgarch_nig_-ar1, echo = FALSE}
+# spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),                 mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig",                   fixed.pars = list(ar1=0))
+# fit6= ugarchfit(spec = spec6,data = rte,solver="hybrid")
+# show(fit6)
+
+spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",
+                   fixed.pars = list(ar1=0))
+fit6= ugarchfit(spec = spec6,data = rte,solver="hybrid")
+show(fit6)
+```
+
+Cette fois le coeffficient $\gamma$ est significatif positif mais nous ne pouvons accepter $H_0$ du test Ljung-Box, Il faudrait augmenter $p$ et/ou $q$ dans l'$ARMA(p,q)$ pour essayer de prendre en compte l'auto-corrélation dans les aléas de `rte`. Nous ne conservons pas ce modèle.
+
+Fixons `ma1` à 0.
+
+```{r gjrgarch_nig_-ma1, echo = FALSE}
+# spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),                   mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig",                   fixed.pars = list(ma1=0))
+# fit6= ugarchfit(spec = spec6,data = rte,solver="hybrid")
+# show(fit6)
+
+spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",
+                   fixed.pars = list(ma1=0))
+fit6= ugarchfit(spec = spec6,data = rte,solver="hybrid")
+show(fit6)
+```
+
+Le coefficient $\gamma_1$ n'est pas significativement différent de zéro, modèle suivant.
+
+Fixons `ar1` et `ma1` à 0.
+
+```{r gjrgarch_nig_-ar1&ma1, echo = FALSE}
+# spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),                   mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig",                   fixed.pars = list(ar1=0, ma1=0))
+# fit6= ugarchfit(spec = spec6,data = rte,solver="hybrid")
+# show(fit6)
+
+spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",
+                   fixed.pars = list(ar1=0, ma1=0))
+fit6= ugarchfit(spec = spec6,data = rte,solver="hybrid")
+show(fit6)
+```
+
+Le coefficient $\gamma_1$ n'est pas significativement différent de zéro, modèle suivant.
+
+Modèle avec distribution GHST, tous les coefficients : 
+
+```{r gjrgarch_ghst_allcoefs, echo = FALSE}
+spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghst")
+fit6= ugarchfit(spec = spec6,data = rte,solver="hybrid")
+show(fit6)
+```
+
+Le coefficient $\gamma_1$ n'est pas significativement différent de zéro et nous n'acceptons pas le test de la statistique de Pearson, modèle suivant.
+
+Fixons `alpha1` à 0.
+
+```{r gjrgarch_ghst_-alpha1, echo = FALSE}
+spec6 = ugarchspec(variance.model=list(model="gjrGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghst",
+                   fixed.pars = list(alpha1=0))
+fit6= ugarchfit(spec = spec6,data = rte,solver="hybrid")
+show(fit6)
+```
+
+Le coefficient $\gamma_1$ est significativement différent de zéro, nous acceptons $H_0$ pour les tests Ljung-Box, ARCH et Pearson, mais pas pour le Sign Bias Test. Il existe un effet taille d'un choc positif dans les données. Modèle suivant.
+
+### 3. eGARCH
+
+Dans le package rugarch le modèle $eGARCH(m,s)$ se réécrit comme suit : 
+$$
+v_t = \sigma_t \epsilon_t
+$$
+\begin{equation}
+  ln(\sigma_t^2) = \alpha_0 + \sum_{i=1}^s \alpha_i \frac{|\epsilon_{t-i}|+\gamma_i \epsilon_{t-i}}{\sigma_{t-i}} + \sum_{j=1}^m \beta_j ln(\sigma_{t-j}^2)
+\end{equation}
+
+Dans cette spécification on prend en compte l'effet de levier. C'est pourquoi on souhaite observer un $\alpha_1$ significativement < 0 (on a bien un effet signe négatif) et $\gamma_1$ significativement > 0 (on a un effet taille). 
+
+```{r egarch_nig_allcoefs, echo = FALSE}
+# spec5 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),                   mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig")
+# fit5 = ugarchfit(spec = spec5, data = rt,out.sample=length(rtt),solver="hybrid")
+# show(fit5)
+
+spec5 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig")
+fit5 = ugarchfit(spec = spec5, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+```
+
+Le coefficient $\gamma_1$ est bien significativement $\neq 0$ et > 0 et le coefficient $\alpha_1$ est bien significativement $\neq 0$ et < 0 mais le test de Pearson n'est pas validé, une pvalue est < 5%.
+
+Fixons `skew` à 0.
+
+```{r egarch_nig_-skew, echo = FALSE}
+# spec5 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),                   mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig", fixed.pars = list(skew=0))
+# fit5 = ugarchfit(spec = spec5, data = rt,out.sample=length(rtt), solver="hybrid")
+# show(fit5)
+
+spec5 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",
+                   fixed.pars = list(skew=0))
+fit5 = ugarchfit(spec = spec5, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+```
+
+A nouveau, le coefficient $\gamma_1$ est bien significativement $\neq 0$ et > 0 et le coefficient $\alpha_1$ est bien significativement $\neq 0$ et < 0 mais le test de Pearson n'est pas validé, une pvalue est < 5%.
+
+Fixons `mu` à 0.
+
+```{r egarch_nig_-mu, echo = FALSE}
+#spec5 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),                   mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig", fixed.pars = list(mu=0))
+#fit5 = ugarchfit(spec = spec5, data = rt,out.sample=length(rtt),solver="hybrid")
+#show(fit5)
+
+spec5 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",
+                   fixed.pars = list(mu=0))
+fit5 = ugarchfit(spec = spec5, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+```
+
+Pour ce modèle, tout est bon, il n'a pas été sélectionné face au modèle dans le corps du texte puisque le modèle APARCH est plus complet et le BIC est plus grand pour ce eGARCH, et donc on préfère le APARCH selon le critère du BIC.
+
+Fixons `mu` et `skew` à 0.
+
+```{r egarch_nig_-mu&skew, echo = FALSE}
+# spec5 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),                   mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig", fixed.pars = list(mu=0, skew=0))
+# fit5 = ugarchfit(spec = spec5, data = rt,out.sample=length(rtt), solver="hybrid")
+# show(fit5)
+
+spec5 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",
+                   fixed.pars = list(mu=0, skew=0))
+fit5 = ugarchfit(spec = spec5, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+```
+
+A nouveau, le coefficient $\gamma_1$ est bien significativement $\neq 0$ et > 0 et le coefficient $\alpha_1$ est bien significativement $\neq 0$ et < 0 mais le test de Pearson n'est pas validé, une pvalue est < 5%.
+
+Modèle avec distribution GHST, tous les coefficients : 
+
+```{r egarch_ghst_allcoefs, echo = FALSE}
+spec5 = ugarchspec(variance.model=list(model="eGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghst")
+fit5 = ugarchfit(spec = spec5, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit5)
+```
+
+Encore une fois, le coefficient $\gamma_1$ est bien significativement $\neq 0$ et > 0 et le coefficient $\alpha_1$ est bien significativement $\neq 0$ et < 0 mais le test de Pearson n'est pas validé, une pvalue est < 5%.
+Il y a juste le coefficient `skew` qui n'est pas significativement différent de zéro, il n'est cependant pas possible de le fixer pour uen `ghst`.
+
+Nous en avons terminé avec les modèles ARCH/GARCH asymétriques, nous allons maintenant étudier des modèles symétriques. Mais \textbf{nous avions a priori un effet de levier} selon le projet 1, et les 3 modèles suivants supposent tous qu'une bonne nouvelle a autant d'impact sur la volatilité qu'une mauvaise nouvelle, qu'il n'y a donc pas d'effet de levier. Nous allons quand même les tester même si nous nous doutons à l'avance que nous ne devrions pas utiliser un de ces modèles en priorité.
+
+### 4. iGARCH
+
+Nous pouvons réécrire ce modèle comme suit : 
+$$
+v_t=\sigma_t \epsilon_t
+$$
+\begin{equation}
+  \sigma_t^2 = \alpha_0 + \beta_1 \sigma_{t-1}^2 + (1-\beta_1)v_{t-1}^2
+\end{equation}
+
+Dans ce modèle on estime $\alpha_1$ et on calcule $\beta_1$ ($\beta_1 = 1 - \alpha_1$). Si le coefficient $\alpha_1$ n'est pas significativement différent de 0, on ne conserve pas le modèle iGARCH
+
+Nous testons en premier un iGARCH avec distribution `nig` et tous les coefficients :
+
+```{r igarch_nig_allcoefs, echo = FALSE}
+#spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),                   mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig")
+#fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+#show(fit4)
+
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig")
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+```
+
+Le coefficient $\alpha_1$ est > 0 mais le test de Pearson n'est pas validé. Quant à eux, les coefficients `ar1`, `ma1` et `skew` ne sont pas significatifs, nous allons les fixer à tour de rôle. 
+
+Nous allons tester un iGARCH avec distribution `nig` et coefficient `ar1` fixé à 0.
+
+```{r igarch_nig_-ar1, echo = FALSE}
+# spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),                   mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig", fixed.pars = list(ar1=0))
+#fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+# show(fit4)
+
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",
+                   fixed.pars = list(ar1=0))
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+```
+
+Le coefficient $\alpha_1$ est > 0 mais les test de Ljung-Box et de Pearson ne sont pas validés.
+
+Fixons `ar1` et `skew` à 0.
+
+```{r igarch_nig_-ar1&skew, echo=FALSE}
+#spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),                    mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig", fixed.pars = list(ar1=0, skew=0))
+#fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+#show(fit4)
+
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",
+                   fixed.pars = list(ar1=0, skew=0))
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+```
+
+Egalement, le coefficient $\alpha_1$ est > 0 mais les test de Ljung-Box et de Pearson ne sont pas validés.
+
+Fixons `skew` à 0.
+
+```{r igarch_nig_-skew, echo=FALSE}
+#spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),                   mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig", fixed.pars = list(skew=0))
+#fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+#show(fit4)
+
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",
+                   fixed.pars = list(skew=0))
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+```
+
+Le coefficient $\alpha_1$ est > 0 mais le test de Pearson n'est pas validé.
+
+Fixons `ma1` et `skew` à 0.
+
+```{r igarch_nig_-ma1&skew, echo=FALSE}
+#spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),         mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,jan    vier))),distribution.model="nig", fixed.pars = list(ma1=0, skew=0))
+#fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+#show(fit4)
+
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",
+                   fixed.pars = list(ma1=0, skew=0))
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+
+```
+
+Le coefficient $\alpha_1$ est > 0 mais le test de Pearson n'est pas validé.
+
+Fixons `ar1`, `ma1` et `skew` à 0.
+
+```{r igarch_nig_-ar1&ma1&skew, echo=FALSE}
+# spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),        mean.model=list(armaOrder=c(1,1),external.regressors=as.matrix(cbind(lundi,janvi   er))),distribution.model="nig",fixed.pars = list(ar1=0, ma1=0, skew=0))
+#fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+#show(fit4)
+
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="nig",
+                   fixed.pars = list(ar1=0, ma1=0, skew=0))
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+```
+
+Egalement, le coefficient $\alpha_1$ est > 0 mais les test de Ljung-Box et de Pearson ne sont pas validés.
+
+Testons maintenant un iGARCH avec une distribution `ghst` et tous les coefficients.
+
+```{r igarch_ghst_allcoefs, echo=FALSE}
+spec4 = ugarchspec(variance.model=list(model="iGARCH", garchOrder=c(1,1)),
+                   mean.model=list(armaOrder=c(1,1)),distribution.model="ghst")
+fit4 = ugarchfit(spec = spec4, data = rt,out.sample=length(rtt),solver="hybrid")
+show(fit4)
+```
+
+Le coefficient $\alpha_1$ n'est pas significativement différent de zéro (pvalue > 5%, accepte $H_0$ : $\alpha_1 = 0$). Nous ne gardons pas cette spécification, pouvons passer à la suite.
+
+### 5. ARCH-m
+
+Quand le rendement d'un titre peut dépendre de sa volatilité, on considère un modèle GARCH(&,&)-M tel que :
+$$
+r_t = \mu + c \sigma_t^2 + v_t
+$$
+$$
+v_t = \sigma_t \epsilon_t
+$$
+\begin{equation}
+  \sigma_t^2 = \alpha_0 + \alpha_1 v_{t-1}^2 + \beta_1 \sigma_{t-1}^2
+\end{equation}
+
+Où $\mu$ et $c$ sont des constantes et $c$ est appelé le paramètre de prime de risque. Si $c > 0$ alors le rendement est positiviement relié à sa volatilité.
+
+Dans les sorties de R nous devons avoir le coefficient `archm` significativement différent de zéro si nous voulons conserver la spécification ARCH-M.
+
+Testons d'abord avec la distribution `nig` et tous les coefficients.
+
+```{r archm_nig_allcoefs, echo=FALSE}
+# spec3 = ugarchspec(mean.model=list(armaOrder=c(1,1),archm=TRUE,external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model="nig")
+# fit3 = ugarchfit(spec = spec3,data = rt,out.sample=length(rtt),solver="hybrid")
+# fit3
+
+spec3 = ugarchspec(mean.model=list(armaOrder=c(1,1),archm=TRUE),distribution.model="nig")
+fit3 = ugarchfit(spec = spec3,data = rt,out.sample=length(rtt),solver="hybrid")
+fit3
+```
+
+La pvalue du coefficient `archm` = 0.395 > 0.05, nous ne pouvons rejeter $H_0$ : `archm`=0. Passons à la distribution `ghst`.
+
+```{r archm_ghst_allcoefs, echo=FALSE}
+spec3 = ugarchspec(mean.model=list(armaOrder=c(1,1),archm=TRUE),distribution.model="ghst")
+fit3 = ugarchfit(spec = spec3,data = rt,out.sample=length(rtt),solver="hybrid")
+fit3
+```
+
+La pvalue du coefficient `archm` = 0.777 > 0.05, nous ne pouvons rejeter $H_0$ : `archm`=0. Changeons de modèle et passons au dernier de nos 6 modèles.
+
+### 6. GARCH
+
+On note un GARCH(1,1) tel que : 
+$$
+v_t = \sigma_t \epsilon_t
+$$
+\begin{equation}
+  \sigma_t^2 = \alpha_0 + \alpha_1 v_{t-1}^2 + \beta_1 \sigma_{t-1}^2,
+\end{equation}
+
+avec $\alpha_1 \geq 0$, $\beta_1 \leq 1$ et $(\alpha_1 + \beta_1) < 1$.
+
+```{r garch_nig_allcoefs, echo=FALSE}
+#spec1 = ugarchspec(mean.model=list(external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model = "nig")
+#fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+#show(fit1)
+
+spec1 = ugarchspec(distribution.model = "nig")
+fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+show(fit1)
+```
+
+Les coefficients `ar1`, `ma1` et `skew` ne sont pas significativement différents de zéro. Nous allons les fixer à zéro un à un. Commençons par fixer le coefficient `ar1` à 0.
+
+```{r garch_nig_-ar1, echo=FALSE}
+#spec1 = ugarchspec(mean.model=list(external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model = "nig", fixed.pars = list(ar1=0))
+#fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+#show(fit1)
+
+spec1 = ugarchspec(distribution.model = "nig", fixed.pars = list(ar1=0))
+fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+show(fit1)
+```
+
+Nous pouvous remarquer qu'il n'y a que le coefficient `skew` qui n'est pas significativement différent de zéro et que tous les tests sont validés. Nous n'aurons pas choisi de conserver ce modèle puisqu'il est symétrique, ne prend pas en compte l'effet de levier, et le BIC est supérieur à celui de notre APARCH.
+
+Testons maintenant un GARCH(1,1) avec `ma1` fixé à 0.
+
+```{r garch_nig_-ma1, echo=FALSE}
+#spec1 = ugarchspec(mean.model=list(external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model = "nig", fixed.pars = list(ma1=0))
+#fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+#show(fit1)
+
+spec1 = ugarchspec(distribution.model = "nig", fixed.pars = list(ma1=0))
+fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+show(fit1)
+```
+
+Le test de Ljung-Box n'est pas validé. Fixons le coefficient `skew` à 0.
+
+```{r garch_nig_-skew, echo=FALSE}
+#spec1 = ugarchspec(mean.model=list(external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model = "nig", fixed.pars = list(skew=0))
+#fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+#show(fit1)
+
+spec1 = ugarchspec(distribution.model = "nig", fixed.pars = list(skew=0))
+fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+show(fit1)
+```
+
+Le test de Pearson n'est pas validé. Fixons les coefficients `ar1` et `ma1` à 0.
+
+```{r garch_nig_-ar1&ma1, echo=FALSE}
+#spec1 = ugarchspec(mean.model=list(external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model = "nig", fixed.pars = list(ar1=0, ma1=0))
+#fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+#show(fit1)
+
+spec1 = ugarchspec(distribution.model = "nig", fixed.pars = list(ar1=0, ma1=0))
+fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+show(fit1)
+```
+
+Le test de Ljung-Box n'est pas validé. Fixons les coefficients `ar1`, `ma1` et `skew` à 0.
+
+```{r garch_nig_-ar1&ma1&skew, echo=FALSE}
+#spec1 = ugarchspec(mean.model=list(external.regressors=as.matrix(cbind(lundi,janvier))),distribution.model = "nig", fixed.pars = list(ar1=0, ma1=0, skew=0))
+#fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+#show(fit1)
+
+spec1 = ugarchspec(distribution.model = "nig", fixed.pars = list(ar1=0, ma1=0, skew=0))
+fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+show(fit1)
+```
+
+Le test de Ljung-Box n'est pas validé.
+
+Et pour finir, la distribution `ghst` n'est pas adéquate avec un modèle GARCH.
+
+```{r garch_ghst, echo=FALSE}
+spec1 = ugarchspec(distribution.model = "ghst")
+fit1 = ugarchfit(spec = spec1, data = rt,out.sample=length(rtt))
+show(fit1)
+
+```
+
+## Annexes C : Calcul des VaR Normale, Cornish Fisher, Historique et Paramétrique avec filtre 
+
+```{r echo=FALSE}
+backTestVaR <- function(x, p = alpha) {
+  normal.VaR = as.numeric(VaR(x, p=p, method="gaussian"))
+  historical.VaR = as.numeric(VaR(x, p=p, method="historical"))
+  modified.VaR = as.numeric(VaR(x, p=p, method="modified"))
+  ans = c(normal.VaR, historical.VaR, modified.VaR)
+  names(ans) = c("Normal", "HS", "Modified")
+  return(ans)
+}
+
+# rolling 1-step ahead estimates of VaR
+VaR.results = rollapply(as.zoo(rt), width=Ne, 
+                        FUN = backTestVaR, p=alpha, by.column = FALSE,
+                        align = "right")
+#VaR.results = lag(VaR.results, k=-1)
+# chart.TimeSeries(merge(rt, VaR.results),legend.loc="topright")
+
+
+
+violations.mat = matrix(0, 3, 5)
+rownames(violations.mat) = c("Normal", "HS", "Modified")
+colnames(violations.mat) = c("En1", "n1", "1-alpha", "Percent", "VR")
+violations.mat[, "En1"] = (1-alpha)*Nt
+violations.mat[, "1-alpha"] = 1 - alpha
+
+# Show Normal VaR violations
+normalVaR.violations = as.numeric(as.zoo(rt[index(VaR.results)])) < VaR.results[, "Normal"]
+violation.dates = index(normalVaR.violations[which(normalVaR.violations)])
+
+
+for(i in colnames(VaR.results)) {
+  VaR.violations = as.numeric(as.zoo(rt[index(VaR.results)])) < VaR.results[, i]
+  violations.mat[i, "n1"] = sum(VaR.violations)
+  violations.mat[i, "Percent"] = sum(VaR.violations)/Nt
+  violations.mat[i, "VR"] = violations.mat[i, "n1"]/violations.mat[i, "En1"]
+}
+# violations.mat
+
+resultats<-data.frame(matrix(NA,ncol=4,nrow=3))
+colnames(resultats)<-c("expected.exceed","actual.exceed","Kupiecpv","Christoffersenpv")
+rownames(resultats)<-c("Normale","HS","CF")
+
+# normale
+VaR.test1 = VaRTest(1-alpha,actual=coredata(rt[index(VaR.results)]), VaR=coredata(VaR.results[,"Normal"]))
+resultats[1,1]=VaR.test1$expected.exceed
+resultats[1,2]=VaR.test1$actual.exceed
+resultats[1,3]=VaR.test1$uc.LRp
+resultats[1,4]=VaR.test1$cc.LRp
+
+# historique
+VaR.test2 = VaRTest(1-alpha,actual=coredata(rt[index(VaR.results)]), VaR=coredata(VaR.results[,"HS"]))
+resultats[2,1]=VaR.test2$expected.exceed
+resultats[2,2]=VaR.test2$actual.exceed
+resultats[2,3]=VaR.test2$uc.LRp
+resultats[2,4]=VaR.test2$cc.LRp
+
+
+
+# modifie
+VaR.test3 = VaRTest(1-alpha, actual=coredata(rt[index(VaR.results)]), VaR=coredata(VaR.results[,"Modified"]))
+
+resultats[3,1]=VaR.test3$expected.exceed
+resultats[3,2]=VaR.test3$actual.exceed
+resultats[3,3]=VaR.test3$uc.LRp
+resultats[3,4]=VaR.test3$cc.LRp
+
+resultats
+```
+
+Ci-dessus le tableau des violations théoriques et empiriques et des pvalues de Kupiec et Christoffersen pour les VaR Normale, Cornish-Fisher et Historique. Nous avons déjà fait les commentaires dans le corps du texte.
+
+```{r varfiltre, echo=FALSE, fig.cap="VaR avec filtre"}
+fitCHOISIE= ugarchfit(spec = specCHOISIE,data = rt,out.sample=length(rtt),solver="hybrid")
+spec2 = specCHOISIE
+setfixed(spec2)<-as.list(coef(fitCHOISIE))
+filt = ugarchfilter(spec=spec2, data=rtt)
+#filt
+# location(alpha)+scale(beta) invariance allows to use [mu + sigma*q(p,0,1,skew,shape)]
+VaR=fitted(filt)+sigma(filt)*qdist("nig",p=0.05,mu=0,sigma=1,
+                                   skew = coef(filt)["skew"],shape=coef(filt)["shape"])
+
+matplot(cbind(VaR,rtt),type="l",col=c("red","blue"))
+```
+
+Cette méthode avec filtre a l'avantage de donner les résultats des estimations, on sait les points qui dépassent la VaR.
